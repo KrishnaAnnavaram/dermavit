@@ -9,7 +9,7 @@
 ![Models](https://img.shields.io/badge/Models-ViT--B%2F16_%7C_Hiera--B_%7C_EfficientNet_%7C_baseline-1F3864?style=for-the-badge)
 ![Split](https://img.shields.io/badge/Split-grouped_by_lesion-2E5FD9?style=for-the-badge)
 ![CLI commands](https://img.shields.io/badge/CLI_commands-7-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-40_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-34_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -112,7 +112,7 @@ dermavit gives each of these questions its own component. Each component has tes
 | Models | `vit_b16`, `hiera_base` (Hugging Face), `efficientnet_b0` (torchvision), `tiny_cnn`, and the classical baseline |
 | Offline mode | The baseline, the demo and all core tests. No download, no GPU, no torch |
 | Safety | The split refuses a shared lesion. Validation and test have no random augmentation. The best checkpoint is reloaded |
-| Tests | **40** tests pass with torch. In CI (no torch), **34** pass and 1 module of 6 tests skips |
+| Tests | **40** unit tests (`pytest`). CI installs only `.[dev]`: **34** pass and 1 module of 6 tests skips (`torch` extra). With the `torch` extra: 40 pass |
 
 ```mermaid
 flowchart LR
@@ -522,8 +522,8 @@ Planned milestones (not built):
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests with torch (local) | **40 passed** | `pytest -q` |
-| Unit tests in a clean venv with `pip install -e ".[dev]"` (as in CI) | **34 passed, 1 skipped** (the torch module) | `pytest -q` |
+| Unit tests (CI installs only `.[dev]`) | **34 passed, 1 skipped** (the torch module of 6 tests) | `pytest -q` |
+| Unit tests with the `torch` extra | **40 passed** | `pytest -q` |
 
 **SYNTHETIC demo** (600 lesions, 1,287 images, 150 external test images, baseline, 5 seeds, mean and 95 % t-interval):
 
@@ -532,7 +532,7 @@ Planned milestones (not built):
 | By image (leaks) | **0.930** (0.868–0.992) | 0.740 (0.738–0.741) | 0.941 | 0.871 |
 | By lesion | **0.715** (0.649–0.781) | 0.721 (0.673–0.770) | 0.941 | 0.894 |
 
-The image split gives a validation score 0.19 higher than its test score. The lesion split gives a validation score close to the test score. This is the leakage of problem 1, measured.
+The image split gives a validation score 0.19 higher than its test score. The lesion split gives a validation score close to the test score. This is the leakage of problem 1 in section 3.7, measured.
 
 **SYNTHETIC folder run** (`synth` defaults, 3 seeds, CPU, `tiny_cnn` from random weights, 12 epochs maximum, patience 4):
 

@@ -1,0 +1,39 @@
+# secrets and local config
+.env
+.env.*
+!.env.example
+
+# data: never commit datasets (see data/README.md)
+/data/*
+!/data/README.md
+
+# models, artefacts and outputs
+/artifacts/
+/runs/
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+*.jpg
+*.png
+/models/
+/outputs/
+*.joblib
+*.pkl
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/

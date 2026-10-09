@@ -72,6 +72,7 @@ This README is the **one location that explains all of dermavit**. It gives thes
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one run](#42-the-life-cycle-of-one-run)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [The label map and the metadata](#5-the-label-map-and-the-metadata)
 6. 🟢 [The lesion split](#6-the-lesion-split)
 7. 🟣 [Transforms and model specs](#7-transforms-and-model-specs)
@@ -143,6 +144,55 @@ flowchart LR
 | Grad-CAM (torch) | `src/dermavit/explain.py` | Heat maps for CNN models |
 | CLI | `src/dermavit/cli.py` | The `dermavit` command with 7 subcommands |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses. `labels.py` is the class order for all modules.
+
+```mermaid
+flowchart TB
+    CLI["cli.py<br/>dermavit command"]
+    subgraph DATAIN["Data in"]
+        CFG["config.py<br/>Settings, load_dotenv"]
+        META["metadata.py<br/>load_metadata, load_isic2018_ground_truth"]
+        SYN["synthetic.py<br/>make_dataset, write_dataset"]
+        SPL["splits.py<br/>lesion_split, image_split"]
+        IMG["images.py<br/>MODEL_SPECS, transforms_for"]
+    end
+    subgraph CORE["Core scoring"]
+        BASE["baseline.py<br/>run_baseline"]
+        FEAT["features.py<br/>34 features"]
+        IMB["imbalance.py<br/>class_weights, melanoma threshold"]
+        MET["metrics.py<br/>classification_report, seed_summary"]
+        REP["reports.py<br/>save_report, compare_runs"]
+    end
+    subgraph TORCH["Torch extra"]
+        TRN["train.py<br/>train_model"]
+        MOD["models.py<br/>build_model"]
+        EXP["explain.py<br/>grad_cam, Python API"]
+    end
+    LAB["labels.py<br/>CLASSES"]
+
+    CLI --> CFG
+    CLI --> META
+    CLI --> SYN
+    CLI --> SPL
+    CLI --> IMG
+    CLI --> BASE
+    CLI --> REP
+    CLI -- "train" --> TRN
+    BASE --> FEAT
+    BASE --> SPL
+    BASE --> IMB
+    BASE --> MET
+    TRN --> IMG
+    TRN --> IMB
+    TRN --> MET
+    TRN --> MOD
+    MOD --> IMG
+    REP --> MET
+    META --> LAB
+    MET --> LAB
+    IMB --> LAB
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -181,6 +231,19 @@ dermavit/
 ### 3.1 One lesion, one split
 `lesion_split` uses `StratifiedGroupKFold` with `lesion_id` as the group. `assert_no_lesion_overlap` raises `LeakageError` if a lesion is in two splits. The ISIC 2018 Task 3 images are the external test set, and no fit uses them.
 
+```mermaid
+flowchart LR
+    HAM[/"HAM10000 metadata<br/>several images for each lesion"/] --> LS["lesion_split<br/>group = lesion_id"]
+    LS --> TR["train lesions"]
+    LS --> VA["val lesions"]
+    TR --> FIT["Fit the model<br/>and the class weights"]
+    VA --> SEL["Best epoch and<br/>melanoma threshold"]
+    ISIC[/"ISIC 2018 Task 3<br/>test images"/] --> TEST["Test reports only<br/>no fit"]
+    FIT --> SEL
+    SEL --> TEST
+    LS -. "lesion in 2 parts" .-> ERR[/"LeakageError"/]
+```
+
 ### 3.2 One label map
 `labels.CLASSES` fixes the class order. The encoder, the model heads, the confusion matrix labels and the ISIC column map all read it.
 
@@ -218,25 +281,54 @@ The headline metric is balanced accuracy. Melanoma recall is in each report. The
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    META["HAM10000_metadata.csv"] --> VAL{"validate_metadata"}
-    VAL -- "problems" --> ERR["error: list of problems"]
+flowchart TD
+    META[/"HAM10000_metadata.csv"/] --> VAL{"validate_metadata"}
+    VAL -- "problems" --> ERR[/"error: list of problems"/]
     VAL -- "valid" --> SPLIT["lesion_split (seed)"]
     SPLIT --> TR["train rows: TrainTransform"]
     SPLIT --> VA["val rows: EvalTransform"]
     TR --> LOOP["Training loop: class-weighted CE, AdamW, cosine LR"]
     VA --> LOOP
-    LOOP --> CK["best.pt at each new best val balanced accuracy"]
+    LOOP --> CK[("best.pt at each new best val balanced accuracy")]
     CK --> RELOAD["Reload best.pt"]
     RELOAD --> THR["Tune melanoma threshold on val"]
-    TEST["ISIC 2018 Task 3 test: EvalTransform"] --> EVAL["Test probabilities"]
+    TEST[/"ISIC 2018 Task 3 test: EvalTransform"/] --> EVAL["Test probabilities"]
     RELOAD --> EVAL
     THR --> EVAL
-    EVAL --> RUN["run.json + confusion CSV"]
+    EVAL --> RUN[("runs/model/seedN/<br/>run.json")]
     RUN --> CMP["compare: mean and t-interval over seeds"]
+    CMP --> OUT[/"Comparison table"/]
+    OUT --> HUMAN{{"HUMAN<br/>researcher reads the seed intervals<br/>no clinical use"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one run
+
+```mermaid
+stateDiagram-v2
+    state "TrainConfig for one seed" as Config
+    state "Seeded, split loaded" as Seeded
+    state "Training epochs" as Epochs
+    state "Stopped" as Stopped
+    state "Best checkpoint reloaded" as Reloaded
+    state "Threshold tuned on val" as Tuned
+    state "Test reports" as Tested
+    state "run.json written" as Written
+    [*] --> Config
+    Config --> Seeded: set_seed, lesion_split
+    Seeded --> Epochs: build_model, DataLoaders
+    Epochs --> Epochs: new best saves best.pt
+    Epochs --> Stopped: patience reached
+    Epochs --> Stopped: last epoch done
+    Stopped --> Reloaded: load best.pt
+    Reloaded --> Tuned: tune_melanoma_threshold
+    Tuned --> Tested: test ground truth present
+    Tuned --> Written: no test ground truth
+    Tested --> Written: efficiency summary
+    Written --> [*]
+```
 
 1. The CLI reads and validates the metadata and the test ground truth.
 2. `lesion_split` divides the lesions into `train` and `val` with the run seed.
@@ -247,11 +339,73 @@ flowchart TB
 7. The run tunes the melanoma threshold on validation and applies it to test.
 8. The run writes `runs/<model>/seed<k>/run.json`.
 
+### 4.3 Who does which step
+
+The sequence shows `dermavit train --model vit_b16` and then `dermavit compare`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as Researcher
+    participant CLI as dermavit CLI
+    participant META as metadata.py
+    participant SPL as splits.py
+    participant TRN as train.py
+    participant HUB as Hugging Face Hub
+    participant MET as metrics.py
+    participant FS as runs/ folder
+
+    R->>CLI: dermavit train --model vit_b16 --seeds 0,1,2
+    CLI->>CLI: load_dotenv, Settings.from_env
+    CLI->>META: load_metadata, load_isic2018_ground_truth
+    META-->>CLI: clean metadata and test labels
+    loop each seed
+        CLI->>SPL: lesion_split(meta, 0.2, seed)
+        CLI->>TRN: train_model(cfg, split, source, test_meta)
+        TRN->>TRN: set_seed, transforms_for, DataLoaders
+        TRN->>HUB: build_model loads google/vit-base-patch16-224-in21k
+        loop each epoch until patience
+            TRN->>TRN: train with class-weighted CE and AdamW
+            TRN->>MET: classification_report on val
+            TRN->>FS: best.pt at a new best
+        end
+        TRN->>FS: load best.pt
+        TRN->>MET: val report with lesion bootstrap
+        TRN->>TRN: tune_melanoma_threshold
+        TRN->>MET: test and thresholded test reports
+        TRN->>FS: run.json
+        TRN-->>CLI: RunResult
+        CLI-->>R: best epoch, val and test balanced accuracy
+    end
+    R->>CLI: dermavit compare --runs runs --part test
+    CLI->>FS: read each run.json
+    CLI->>MET: seed_summary for each model
+    CLI-->>R: mean and t-interval table
+```
+
 ---
 
 ## 5. The label map and the metadata
 
 **Purpose.** Give one class order and stop bad metadata before a split.
+
+```mermaid
+flowchart TD
+    IN[/"HAM10000_metadata.csv"/] --> EX{"File exists?"}
+    EX -- "no" --> FNF[/"FileNotFoundError"/]
+    EX -- "yes" --> COLS{"7 columns present?"}
+    COLS -- "no" --> ERR[/"MetadataError<br/>list of problems"/]
+    COLS -- "yes" --> NA["Check missing lesion_id,<br/>image_id, dx"]
+    NA --> DX["dx in labels.CLASSES<br/>dx_type in the 4 values"]
+    DX --> SEX["Empty sex becomes unknown<br/>age 0 to 120"]
+    SEX --> DUP["image_id once,<br/>one dx for each lesion"]
+    DUP --> ANY{"Any problem?"}
+    ANY -- "yes" --> ERR
+    ANY -- "no" --> OUT[/"Clean metadata"/]
+    GT[/"ISIC2018_Task3_Test_GroundTruth.csv"/] --> ONE{"image + 7 columns,<br/>exactly one 1 in each row?"}
+    ONE -- "no" --> ERR
+    ONE -- "yes" --> TEST[/"image_id, dx for the test set"/]
+```
 
 | Index | Class | Name |
 |---|---|---|
@@ -277,6 +431,18 @@ flowchart TB
 
 **Purpose.** Measure the model on lesions that it did not see.
 
+```mermaid
+flowchart TD
+    IN[/"Clean metadata, val_fraction, seed"/] --> RNG{"val_fraction<br/>0.05 to 0.5?"}
+    RNG -- "no" --> VE[/"ValueError"/]
+    RNG -- "yes" --> K["Fold count = round(1 / val_fraction)<br/>at least 2"]
+    K --> SG["StratifiedGroupKFold<br/>target dx, group lesion_id, shuffled with the seed"]
+    SG --> FIRST["First test fold = val<br/>other rows = train"]
+    FIRST --> CHK{"assert_no_lesion_overlap<br/>lesion in both parts?"}
+    CHK -- "yes" --> LE[/"LeakageError"/]
+    CHK -- "no" --> OUT[/"Metadata with a split column"/]
+```
+
 **Procedure**
 
 1. Set the fold count to round(1 / `val_fraction`). The default fraction 0.2 gives 5 folds.
@@ -286,7 +452,7 @@ flowchart TB
 
 **Rules**
 
-- `image_split` exists only to measure leakage. The CLI uses it only with `baseline --split-mode image`.
+- `image_split` exists only to measure leakage. The CLI uses it only with `baseline --split-mode image` and in `demo`.
 - A class with fewer lesions than folds gives a scikit-learn warning. The split is still grouped.
 
 ---
@@ -294,6 +460,22 @@ flowchart TB
 ## 7. Transforms and model specs
 
 **Purpose.** Give each model its correct input, and keep evaluation deterministic.
+
+```mermaid
+flowchart TD
+    M[/"Model name"/] --> SPEC["spec_for<br/>MODEL_SPECS: size, mean, std"]
+    SPEC --> TF["transforms_for"]
+    IMG[/"uint8 image from FolderImageSource"/] --> PART{"Training row?"}
+    TF --> PART
+    PART -- "yes" --> RNG["numpy generator<br/>seed, epoch, image index"]
+    RNG --> AUG["TrainTransform<br/>crop 80-100 %, flips, 90-degree rotation"]
+    AUG --> RS1["Resize, brightness +/-10 %"]
+    RS1 --> N1["Normalise with the model mean and std"]
+    PART -- "no, val or test" --> RS2["EvalTransform<br/>resize only"]
+    RS2 --> N2["Normalise with the model mean and std"]
+    N1 --> OUT[/"float32 3 x H x W"/]
+    N2 --> OUT
+```
 
 | Model | Source | Weights | Size | Mean | Std |
 |---|---|---|---|---|---|
@@ -304,7 +486,7 @@ flowchart TB
 
 | Transform | Steps | Used for |
 |---|---|---|
-| `TrainTransform` | Random crop 80–100 %, horizontal and vertical flip, rotation by 0/90/180/270, brightness ±10 %, resize, normalise | Training images |
+| `TrainTransform` | Random crop 80–100 %, horizontal and vertical flip, rotation by 0/90/180/270, resize, brightness ±10 %, normalise | Training images |
 | `EvalTransform` | Resize, normalise | Validation and test images |
 
 **Rules**
@@ -317,6 +499,22 @@ flowchart TB
 ## 8. Class imbalance and the melanoma threshold
 
 **Purpose.** Stop the majority class from controlling the model and the score.
+
+```mermaid
+flowchart TD
+    Y[/"Training labels"/] --> W{"--weighting"}
+    W -- "loss" --> CW["class_weights, inverse<br/>weighted cross-entropy"]
+    W -- "sampler" --> SW["sample_weights<br/>WeightedRandomSampler"]
+    W -- "none" --> PL["Plain cross-entropy"]
+    PV[/"Validation P(mel)"/] --> HAS{"Melanoma in val?"}
+    HAS -- "no" --> T05["threshold = 0.5"]
+    HAS -- "yes" --> TUNE["Highest threshold with<br/>melanoma recall at target_recall or more"]
+    TUNE --> APPLY["apply_melanoma_threshold on test"]
+    T05 --> APPLY
+    APPLY --> DEC{"P(mel) at threshold or more?"}
+    DEC -- "yes" --> MEL[/"Predict mel"/]
+    DEC -- "no" --> OTH[/"Most probable other class"/]
+```
 
 | Item | Rule |
 |---|---|
@@ -338,6 +536,24 @@ flowchart TB
 
 **Purpose.** Train each model in the same, recorded way.
 
+```mermaid
+flowchart TD
+    START[/"Split, image source, TrainConfig"/] --> SEED["set_seed<br/>random, numpy, torch, cuDNN"]
+    SEED --> BUILD["build_model, AdamW,<br/>CosineAnnealingLR, AMP on CUDA"]
+    BUILD --> EP["Epoch: reset peak memory,<br/>train all batches"]
+    EP --> VAL["Validation balanced accuracy"]
+    VAL --> BEST{"New best?"}
+    BEST -- "yes" --> SAVE[("best.pt")]
+    BEST -- "no" --> BAD["bad_epochs + 1"]
+    SAVE --> LOG["EpochLog: loss, seconds,<br/>images per second, peak memory"]
+    BAD --> LOG
+    LOG --> STOP{"bad_epochs at patience,<br/>or last epoch?"}
+    STOP -- "no" --> EP
+    STOP -- "yes" --> LOAD["Load best.pt"]
+    LOAD --> EVAL["Val report, threshold,<br/>test reports"]
+    EVAL --> OUT[("runs/model/seedN/run.json")]
+```
+
 | Setting | Default |
 |---|---|
 | Optimiser | AdamW, learning rate 1e-4, weight decay 0.05 |
@@ -357,6 +573,23 @@ flowchart TB
 ---
 
 ## 10. The metrics
+
+`classification_report` gives all metrics for one prediction set. `seed_summary` combines the runs of one model.
+
+```mermaid
+flowchart LR
+    IN[/"True labels, probabilities,<br/>optional y_pred and lesion groups"/] --> CHK{"check_probs<br/>7 values, non-negative, sum 1?"}
+    CHK -- "no" --> ERR[/"ValueError"/]
+    CHK -- "yes" --> PRED["y_pred = argmax<br/>or the thresholded prediction"]
+    PRED --> CR["Balanced accuracy, macro F1,<br/>recall, melanoma recall, confusion"]
+    CHK -- "yes" --> PR["One-vs-rest AUC, ECE 15 bins<br/>from probabilities"]
+    PRED --> BS{"Lesion groups given?"}
+    BS -- "yes" --> CI["lesion_bootstrap_ci<br/>500 lesion resamples"]
+    CR --> REP[/"Report dict"/]
+    PR --> REP
+    CI --> REP
+    REP --> SS["seed_summary<br/>mean and 95 % t-interval"]
+```
 
 | Metric | Definition | Note |
 |---|---|---|
@@ -379,6 +612,22 @@ flowchart TB
 
 **Purpose.** Give a floor for the deep models, and run the full pipeline without torch.
 
+```mermaid
+flowchart TD
+    IN[/"Metadata, images, test set, seed"/] --> F["compute_features<br/>34 features for each image"]
+    F --> MODE{"--split-mode"}
+    MODE -- "lesion" --> LS["lesion_split"]
+    MODE -- "image" --> IS["image_split<br/>leaks lesions"]
+    LS --> FIT["StandardScaler and<br/>LogisticRegression, balanced"]
+    IS --> FIT
+    FIT --> FP["full_probs<br/>0 for a class absent in training"]
+    FP --> VAL["Val report with lesion bootstrap"]
+    FP --> THR["tune_melanoma_threshold on val"]
+    THR --> TEST["Test report and thresholded test report"]
+    VAL --> OUT[("runs/baseline_mode/seedN/<br/>run.json, test.json, test_confusion.csv")]
+    TEST --> OUT
+```
+
 **Procedure**
 
 1. Calculate 34 features for each image. The features are colour moments, a hue histogram, centre contrast and texture statistics.
@@ -392,6 +641,20 @@ flowchart TB
 ## 12. Grad-CAM
 
 **Purpose.** Show which image region drives a CNN prediction.
+
+```mermaid
+flowchart LR
+    X[/"One image, 1 x 3 x H x W"/] --> SH{"Shape correct?"}
+    SH -- "no" --> E1[/"ValueError"/]
+    SH -- "yes" --> L{"cam_layer or<br/>a given layer?"}
+    L -- "no" --> E2[/"ValueError"/]
+    L -- "yes" --> HK["Forward and backward hooks"]
+    HK --> FW["Forward pass<br/>predicted or given class"]
+    FW --> BW["Back-propagate the class logit"]
+    BW --> WT["Weight maps by the mean gradient<br/>sum, ReLU"]
+    WT --> RS["Resize to H x W<br/>scale to 0 to 1"]
+    RS --> OUT[/"Heat map"/]
+```
 
 **Procedure**
 
@@ -408,6 +671,24 @@ flowchart TB
 ---
 
 ## 13. The CLI and the run files
+
+The map shows the files that each command reads and writes.
+
+```mermaid
+flowchart LR
+    SYN["synth"] --> D[("data/synthetic/<br/>HAM10000 layout")]
+    D --> VAL["validate"]
+    D --> SPL["split"]
+    D --> BASE["baseline"]
+    D --> TRN["train, torch extra"]
+    SPL --> CSV[("split.csv")]
+    BASE --> RB[("runs/baseline_mode/seedN/<br/>run.json, test.json, test_confusion.csv")]
+    TRN --> RT[("runs/model/seedN/<br/>run.json, best.pt")]
+    RB --> CMP["compare --part"]
+    RT --> CMP
+    CMP --> TAB[/"Mean and t-interval for each model"/]
+    DEMO["demo"] -. "in memory, no files" .-> TAB2[/"Image split against lesion split"/]
+```
 
 | Command | What it does |
 |---|---|
@@ -490,7 +771,7 @@ dermavit compare --runs runs --part test
 | Variable | Used by | Meaning |
 |---|---|---|
 | `DERMAVIT_DATA_DIR` | CLI | Data folder. Default `data` |
-| `DERMAVIT_OUTPUT_DIR` | Settings | Output folder name. Default `runs` (the CLI `--out` overrides it) |
+| `DERMAVIT_OUTPUT_DIR` | Settings | Output folder name. Default `runs`. No command reads it. The commands use `--out` or `--runs` (default `runs`) |
 | `DERMAVIT_SEED` | `split` | Default seed. Default 42 |
 | `DERMAVIT_DEVICE` | `train` | `auto` (default), `cpu`, `cuda` or `mps` |
 | `HF_HOME` | transformers | Cache folder for the downloaded weights |
